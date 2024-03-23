@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = [
+    "ele",
+    "eled",
+]
+
+[workspace.package]
+# these apply to all crates
+version = "0.1.0"
+authors = ["Niklas Sombert <niklas@ytvwld.de>"]
+license = "MPL-2.0"
+repository = "https://github.com/YtvwlD/ele"
