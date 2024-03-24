@@ -1,8 +1,25 @@
 use std::{env, io::IsTerminal, os::fd::{AsFd, AsRawFd, FromRawFd}};
 
+use argh::{from_env, FromArgs};
 use log::debug;
 use tokio::{fs::File, io::{AsyncReadExt, AsyncWriteExt}};
 use zbus::{proxy, zvariant::OwnedFd, Connection, Result};
+
+#[derive(Debug, FromArgs)]
+/// Top-level command.
+struct Cli {
+    /// what user to run the program as
+    #[argh(option, default = "\"root\".to_string()")]
+    user: String,
+
+    /// the appliation to run
+    #[argh(positional)]
+    program: String,
+
+    /// the arguments to pass to it
+    #[argh(positional, greedy)]
+    args: Vec<String>,
+}
 
 #[proxy(
     interface = "de.ytvwld.Ele1",
@@ -10,7 +27,7 @@ use zbus::{proxy, zvariant::OwnedFd, Connection, Result};
     default_path = "/de/ytvwld/Ele"
 )]
 trait EleD {
-    async fn create(&self, user: &str, argv: Vec<&str>) -> Result<String>;
+    async fn create(&self, user: &str, argv: Vec<String>) -> Result<String>;
 }
 
 #[proxy(
@@ -27,11 +44,14 @@ async fn main() -> Result<()> {
         env::set_var("RUST_LOG", "info");
     }
     env_logger::init();
+    let cli: Cli = from_env();
     debug!("Establishing connection to dbus...");
     let connection = Connection::session().await?;
     let eled_proxy = EleDProxy::new(&connection).await?;
     debug!("Waiting for authorization...");
-    let path = eled_proxy.create("root", vec!["id"]).await?;
+    let mut args = cli.args.clone();
+    args.insert(0, cli.program);
+    let path = eled_proxy.create(&cli.user, args).await?;
     let process = EleProcessProxy::builder(&connection)
         .path(path)?
         .build().await?;
