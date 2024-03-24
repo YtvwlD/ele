@@ -1,6 +1,7 @@
-use std::{error, future::pending};
+use std::{error, future::pending, os::fd::AsFd};
 use pty_process::{Command, Pty};
-use zbus::{connection, fdo::Error, interface, message::Header, ObjectServer};
+use tokio::process::Child;
+use zbus::{connection, fdo::Error, interface, message::Header, zvariant::Fd, ObjectServer};
 
 struct EleD {
     /// The ID to give to the next spawned process.
@@ -51,6 +52,7 @@ struct EleProcess {
     sender: String,
     pty: Pty,
     command: Command,
+    child: Option<Child>,
 }
 
 impl EleProcess {
@@ -66,7 +68,7 @@ impl EleProcess {
             Error::InvalidArgs("command is missing".to_string())
         )?);
         command.args(argv_iter);
-        Ok(Self { sender, pty, command })
+        Ok(Self { sender, pty, command, child: None })
     }
 
     fn check_caller(&self, header: Header<'_>) -> Result<(), Error> {
@@ -102,13 +104,15 @@ impl EleProcess {
     async fn spawn(
         &mut self,
         #[zbus(header)] header: Header<'_>,
-    ) -> Result<String, Error> {
+    ) -> Result<Fd, Error> {
         self.check_caller(header)?;
-        let child = self.command.spawn(&self.pty.pts().map_err(
+        if self.child.is_some() {
+            return Err(Error::FileExists("process is already running".to_string()));
+        }
+        self.child = Some(self.command.spawn(&self.pty.pts().map_err(
             |e| Error::SpawnFailed(e.to_string())
-        )?).map_err(|e| Error::SpawnFailed(e.to_string()))?;
-
-        todo!()
+        )?).map_err(|e| Error::SpawnFailed(e.to_string()))?);
+        Ok(Fd::Borrowed(self.pty.as_fd()))
     }
 }
 
