@@ -9,7 +9,7 @@ trait EleD {
     async fn spawn(&self, argv: Vec<&str>) -> Result<String>;
 }
 
-#[async_std::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let connection = Connection::session().await?;
     let proxy = EleDProxy::new(&connection).await?;

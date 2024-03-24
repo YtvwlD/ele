@@ -11,7 +11,7 @@ impl EleD {
     }
 }
 
-#[async_std::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
     let eled = EleD {};
     let _conn = connection::Builder::session()?
