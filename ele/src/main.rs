@@ -6,14 +6,14 @@ use zbus::{Connection, Result, proxy};
     default_path = "/de/ytvwld/Ele"
 )]
 trait EleD {
-    async fn spawn(&self, argv: Vec<&str>) -> Result<String>;
+    async fn create(&self, user: &str, argv: Vec<&str>) -> Result<String>;
 }
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let connection = Connection::session().await?;
     let proxy = EleDProxy::new(&connection).await?;
-    let reply = proxy.spawn(vec!["id"]).await?;
+    let reply = proxy.create("root", vec!["id"]).await?;
     println!("{reply}");
 
     Ok(())
