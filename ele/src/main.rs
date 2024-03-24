@@ -1,5 +1,6 @@
-use std::{io::IsTerminal, os::fd::AsFd};
+use std::{io::IsTerminal, os::fd::{AsFd, AsRawFd, FromRawFd}};
 
+use tokio::{fs::File, io::{AsyncReadExt, AsyncWriteExt}};
 use zbus::{proxy, zvariant::OwnedFd, Connection, Result};
 
 #[proxy(
@@ -30,6 +31,20 @@ async fn main() -> Result<()> {
     // TODO: environment, cwd and resize
     let fd = process.spawn().await?;
     assert!(fd.as_fd().is_terminal());
+    let mut file = unsafe { File::from_raw_fd(fd.as_raw_fd()) };
+    loop {
+        let mut buf = [0; 256];
+        match file.read(&mut buf).await {
+            Ok(0) => todo!("process has closed stdout"),
+            Ok(_) => Ok(()),
+            Err(e) => match e.kind() {
+                // this is fine; we just didn't get any text yet
+                std::io::ErrorKind::WouldBlock => Ok(()),
+                _ => Err(e),
+            }
+        }?;
+        tokio::io::stdout().write(&buf).await?;
+    }
     todo!();
 
     Ok(())
