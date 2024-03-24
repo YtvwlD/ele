@@ -1,5 +1,6 @@
-use std::{io::IsTerminal, os::fd::{AsFd, AsRawFd, FromRawFd}};
+use std::{env, io::IsTerminal, os::fd::{AsFd, AsRawFd, FromRawFd}};
 
+use log::debug;
 use tokio::{fs::File, io::{AsyncReadExt, AsyncWriteExt}};
 use zbus::{proxy, zvariant::OwnedFd, Connection, Result};
 
@@ -22,13 +23,20 @@ trait EleProcess {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
+    if env::var("RUST_LOG").is_err() {
+        env::set_var("RUST_LOG", "info");
+    }
+    env_logger::init();
+    debug!("Establishing connection to dbus...");
     let connection = Connection::session().await?;
     let eled_proxy = EleDProxy::new(&connection).await?;
+    debug!("Waiting for authorization...");
     let path = eled_proxy.create("root", vec!["id"]).await?;
     let process = EleProcessProxy::builder(&connection)
         .path(path)?
         .build().await?;
     // TODO: environment, cwd and resize
+    debug!("Spawning process...");
     let fd = process.spawn().await?;
     assert!(fd.as_fd().is_terminal());
     let mut file = unsafe { File::from_raw_fd(fd.as_raw_fd()) };

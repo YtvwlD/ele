@@ -1,4 +1,5 @@
-use std::{error, future::pending, os::fd::AsFd};
+use std::{env, error, future::pending, os::fd::AsFd};
+use log::debug;
 use pty_process::{Command, Pty};
 use tokio::process::Child;
 use zbus::{connection, fdo::Error, interface, message::Header, zvariant::Fd, ObjectServer};
@@ -25,19 +26,19 @@ impl EleD {
         #[zbus(header)] header: Header<'_>,
         user: &str, argv: Vec<&str>,
     ) -> Result<String, Error> {
+        let sender = header
+            .sender()
+            .ok_or(Error::AccessDenied("couldn't get sender".to_string()))?
+            .as_str()
+            .to_string();
+        debug!("Client {} has asked us to execute {:?} as {}.", sender, argv, user);
         assert_eq!(user, "root"); // TODO
         // TODO: actually check authentication
-        let process = EleProcess::new(
-            header
-                .sender()
-                .ok_or(Error::AccessDenied("couldn't get sender".to_string()))?
-                .as_str()
-                .to_string(),
-            argv,
-        )?;
+        let process = EleProcess::new(sender, argv)?;
         let id = self.next_id;
         self.next_id += 1;
         let path = format!("/de/ytvwld/Ele/{id}");
+        debug!("Registering object at {path}...");
         object_server.at(path.clone(), process).await?;
         Ok(path)
     }
@@ -61,6 +62,7 @@ impl EleProcess {
     /// We *need* to make sure that the caller is authenticated to perform this
     /// action *beforehand*.
     fn new(sender: String, argv: Vec<&str>) -> Result<Self, Error> {
+        debug!("Creating pty...");
         let pty = Pty::new()
             .map_err(|e| Error::SpawnFailed(e.to_string()))?;
         let mut argv_iter = argv.iter();
@@ -109,6 +111,7 @@ impl EleProcess {
         if self.child.is_some() {
             return Err(Error::FileExists("process is already running".to_string()));
         }
+        debug!("spawning process...");
         self.child = Some(self.command.spawn(&self.pty.pts().map_err(
             |e| Error::SpawnFailed(e.to_string())
         )?).map_err(|e| Error::SpawnFailed(e.to_string()))?);
@@ -118,6 +121,11 @@ impl EleProcess {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn error::Error>> {
+    if env::var("RUST_LOG").is_err() {
+        env::set_var("RUST_LOG", "info");
+    }
+    env_logger::init();
+    debug!("Establishing connection to dbus...");
     let _conn = connection::Builder::session()?
         .name("de.ytvwld.Ele")?
         .serve_at("/de/ytvwld/Ele", EleD::new())?

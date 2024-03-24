@@ -9,6 +9,8 @@ repository.workspace = true
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+env_logger = { version = "0.10", default-features = false, features = [ "auto-color" ]}
+log = "0.4.4"
 tokio = { version = "1.36", features = [ "macros", "rt" ] }
 zbus = { version = "4.1", default-features = false, features = [ "tokio" ] }
 pty-process = { version = "0.4", features = [ "async" ] }
