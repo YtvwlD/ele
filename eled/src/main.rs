@@ -121,6 +121,20 @@ impl EleProcess {
         todo!()
     }
 
+    async fn directory(
+        &mut self,
+        #[zbus(header)] header: Header<'_>,
+        path: &str,
+    ) -> Result<(), Error> {
+        self.check_caller(header)?;
+        if self.child.is_some() {
+            return Err(Error::FileExists("can't set cwd after the process has been started".to_string()));
+        }
+        debug!("setting directory to {path}...");
+        self.command.current_dir(path);
+        Ok(())
+    }
+
     async fn resize(
         &mut self,
         #[zbus(header)] header: Header<'_>,

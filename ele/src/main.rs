@@ -37,6 +37,7 @@ trait EleD {
     default_service = "de.ytvwld.Ele",
 )]
 trait EleProcess {
+    async fn directory(&self, path: &str) -> Result<()>;
     async fn spawn(&self) -> Result<OwnedFd>;
 }
 
@@ -57,7 +58,12 @@ async fn main() -> Result<()> {
     let process = EleProcessProxy::builder(&connection)
         .path(path)?
         .build().await?;
-    // TODO: environment, cwd and resize
+    debug!("passing current directory...");
+    process.directory(
+        env::current_dir()?.to_str()
+            .expect("failed to get current directory")
+    ).await?;
+    // TODO: environment and resize
     debug!("Spawning process...");
     let fd = process.spawn().await?;
     assert!(fd.as_fd().is_terminal());
