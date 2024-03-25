@@ -329,6 +329,7 @@ dependencies = [
  "argh",
  "env_logger",
  "log",
+ "nix",
  "pty-process",
  "tokio",
  "zbus",

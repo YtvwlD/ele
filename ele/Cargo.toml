@@ -12,6 +12,7 @@ repository.workspace = true
 argh = "0.1"
 env_logger = { version = "0.10", default-features = false, features = [ "auto-color" ]}
 log = "0.4.4"
+nix = { version = "0.28", default-features = false, features = [ "fs", "term" ] }
 pty-process = { git = "https://github.com/YtvwlD/pty-process.git", branch = "from-fd", features = [ "async" ] }
 tokio = { version = "1.36", features = [ "io-std", "macros", "rt" ] }
 zbus = { version = "4.1", default-features = false, features = [ "tokio" ] }

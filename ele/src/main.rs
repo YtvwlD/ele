@@ -2,8 +2,9 @@ use std::{env, io::IsTerminal, os::fd::{AsFd, AsRawFd}};
 
 use argh::{from_env, FromArgs};
 use log::debug;
+use nix::{errno::Errno, sys::termios::{cfmakeraw, tcgetattr, tcsetattr, SetArg, Termios}, unistd::isatty};
 use pty_process::Pty;
-use tokio::io::{copy_bidirectional, join, stdin, stdout};
+use tokio::io::{copy_bidirectional, join, stdin, stdout, Join, Stdin, Stdout};
 use zbus::{proxy, zvariant::OwnedFd, Connection, Result};
 
 #[derive(Debug, FromArgs)]
@@ -64,7 +65,45 @@ async fn main() -> Result<()> {
     let mut stdin = stdin();
     let mut stdout = stdout();
     let mut terminal = join(&mut stdin, &mut stdout);
+    // set the tty as raw
+    let old_attrs = set_raw(&mut terminal)?;
     copy_bidirectional(&mut pty, &mut terminal).await?;
+    // restore the terminal configuration
+    if let Some(attrs) = old_attrs {
+        reset_terminal(&mut terminal, attrs)?;
+    }
 
     Ok(())
+}
+
+
+/// Sets the tty to raw mode (if it is a tty).
+/// 
+/// Returns the original mode.
+fn set_raw(
+    terminal: &mut Join<&mut Stdin, &mut Stdout>,
+) -> std::result::Result<Option<Termios>, Errno> {
+    if !isatty(terminal.reader().as_raw_fd())? {
+        debug!("stdin is not connected to a tty, not modifying it");
+        return Ok(None);
+    }
+    if !isatty(terminal.writer().as_raw_fd())? {
+        debug!("stdout is not connected to a tty, not modifying it");
+        return Ok(None);
+    }
+    let old_attrs = tcgetattr(terminal.writer())?;
+    let mut new_attrs = old_attrs.clone();
+    cfmakeraw(&mut new_attrs);
+    tcsetattr(terminal.writer(), SetArg::TCSAFLUSH, &new_attrs)?;
+    
+    Ok(Some(old_attrs))
+}
+
+/// Reset the terminal to the old arguments.
+/// 
+/// Only call this, if it's actually a tty.
+fn reset_terminal(
+    terminal: &mut Join<&mut Stdin, &mut Stdout>, attrs: Termios,
+) -> std::result::Result<(), Errno> {
+    tcsetattr(terminal.writer(), SetArg::TCSAFLUSH, &attrs)
 }
