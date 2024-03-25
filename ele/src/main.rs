@@ -1,8 +1,9 @@
-use std::{env, io::IsTerminal, os::fd::{AsFd, AsRawFd, FromRawFd}};
+use std::{env, io::IsTerminal, os::fd::{AsFd, AsRawFd}};
 
 use argh::{from_env, FromArgs};
 use log::debug;
-use tokio::{fs::File, io::{AsyncReadExt, AsyncWriteExt}};
+use pty_process::Pty;
+use tokio::io::{copy_bidirectional, join, stdin, stdout};
 use zbus::{proxy, zvariant::OwnedFd, Connection, Result};
 
 #[derive(Debug, FromArgs)]
@@ -59,21 +60,11 @@ async fn main() -> Result<()> {
     debug!("Spawning process...");
     let fd = process.spawn().await?;
     assert!(fd.as_fd().is_terminal());
-    let mut file = unsafe { File::from_raw_fd(fd.as_raw_fd()) };
-    loop {
-        let mut buf = [0; 256];
-        match file.read(&mut buf).await {
-            Ok(0) => todo!("process has closed stdout"),
-            Ok(_) => Ok(()),
-            Err(e) => match e.kind() {
-                // this is fine; we just didn't get any text yet
-                std::io::ErrorKind::WouldBlock => Ok(()),
-                _ => Err(e),
-            }
-        }?;
-        tokio::io::stdout().write(&buf).await?;
-    }
-    todo!();
+    let mut pty = unsafe { Pty::from_raw_fd(fd.as_raw_fd()).unwrap() };
+    let mut stdin = stdin();
+    let mut stdout = stdout();
+    let mut terminal = join(&mut stdin, &mut stdout);
+    copy_bidirectional(&mut pty, &mut terminal).await?;
 
     Ok(())
 }

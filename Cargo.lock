@@ -329,6 +329,7 @@ dependencies = [
  "argh",
  "env_logger",
  "log",
+ "pty-process",
  "tokio",
  "zbus",
 ]
@@ -737,8 +738,7 @@ dependencies = [
 [[package]]
 name = "pty-process"
 version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8749b545e244c90bf74a5767764cc2194f1888bb42f84015486a64c82bea5cc0"
+source = "git+https://github.com/YtvwlD/pty-process.git?branch=from-fd#e39b98d1063bbe1e7d590fc3517db06cb97b67e9"
 dependencies = [
  "libc",
  "rustix",
