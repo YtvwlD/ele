@@ -1,4 +1,4 @@
-use std::{env, io::IsTerminal, os::fd::{AsFd, AsRawFd}};
+use std::{collections::HashMap, env, io::IsTerminal, os::fd::{AsFd, AsRawFd}};
 
 use argh::{from_env, FromArgs};
 use log::debug;
@@ -37,6 +37,7 @@ trait EleD {
     default_service = "de.ytvwld.Ele",
 )]
 trait EleProcess {
+    async fn environment(&self, environ: HashMap<String, String>) -> Result<()>;
     async fn directory(&self, path: &str) -> Result<()>;
     async fn spawn(&self) -> Result<OwnedFd>;
 }
@@ -62,6 +63,10 @@ async fn main() -> Result<()> {
     process.directory(
         env::current_dir()?.to_str()
             .expect("failed to get current directory")
+    ).await?;
+    debug!("passing environment...");
+    process.environment(
+        HashMap::from_iter(env::vars())
     ).await?;
     // TODO: environment and resize
     debug!("Spawning process...");

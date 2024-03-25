@@ -116,9 +116,15 @@ impl EleProcess {
     async fn environment(
         &mut self,
         #[zbus(header)] header: Header<'_>,
-    ) -> Result<String, Error> {
+        environ: HashMap<&str, &str>,
+    ) -> Result<(), Error> {
         self.check_caller(header)?;
-        todo!()
+        if self.child.is_some() {
+            return Err(Error::FileExists("can't set environ after the process has been started".to_string()));
+        }
+        debug!("setting environment...");
+        self.command.envs(environ.iter());
+        Ok(())
     }
 
     async fn directory(
