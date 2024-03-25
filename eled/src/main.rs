@@ -1,8 +1,9 @@
-use std::{env, error, future::pending, os::fd::AsFd};
+use std::{collections::HashMap, env, error, future::pending, os::fd::AsFd};
 use log::debug;
 use pty_process::{Command, Pty};
 use tokio::process::Child;
-use zbus::{connection, fdo::Error, interface, message::Header, zvariant::Fd, ObjectServer};
+use zbus::{connection, fdo::Error, interface, message::Header, zvariant::Fd, Connection, ObjectServer};
+use zbus_polkit::policykit1::{AuthorityProxy, CheckAuthorizationFlags, Subject};
 
 struct EleD {
     /// The ID to give to the next spawned process.
@@ -16,12 +17,38 @@ impl EleD {
     fn new() -> Self {
         Self { next_id: 1 }
     }
+
+    async fn check_authorization(connection: &Connection, header: &Header<'_>) -> Result<(), Error> {
+        debug!("checking authorization...");
+        let polkit = AuthorityProxy::new(&connection).await?;
+        let subject = Subject::new_for_message_header(header)
+            .map_err( |e| match e {
+                zbus_polkit::Error::Io(i) => Error::IOError(i.to_string()),
+                zbus_polkit::Error::ParseInt(i) => Error::InvalidArgs(i.to_string()),
+                zbus_polkit::Error::BadSender(i) => Error::InconsistentMessage(i.to_string()),
+                zbus_polkit::Error::MissingSender => Error::InconsistentMessage("missing sender".to_string()),
+                i => Error::AuthFailed(i.to_string()),
+            })?;
+        let result = polkit.check_authorization(
+            &subject,
+            "org.freedesktop.policykit.exec", // TODO: use a custom one
+            &HashMap::new(),
+            CheckAuthorizationFlags::AllowUserInteraction.into(),
+            "",
+        ).await?;
+        if result.is_authorized {
+            Ok(())
+        } else {
+            Err(Error::AccessDenied("not authorized".to_string()))
+        }
+    }
 }
 
 #[interface(name = "de.ytvwld.Ele1")]
 impl EleD {
     async fn create(
         &mut self,
+        #[zbus(connection)] connection: &Connection,
         #[zbus(object_server)] object_server: &&ObjectServer,
         #[zbus(header)] header: Header<'_>,
         user: &str, argv: Vec<&str>,
@@ -33,7 +60,7 @@ impl EleD {
             .to_string();
         debug!("Client {} has asked us to execute {:?} as {}.", sender, argv, user);
         assert_eq!(user, "root"); // TODO
-        // TODO: actually check authentication
+        Self::check_authorization(connection, &header).await?;
         let process = EleProcess::new(sender, argv)?;
         let id = self.next_id;
         self.next_id += 1;
@@ -126,7 +153,7 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
     }
     env_logger::init();
     debug!("Establishing connection to dbus...");
-    let _conn = connection::Builder::session()?
+    let _conn = connection::Builder::system()?
         .name("de.ytvwld.Ele")?
         .serve_at("/de/ytvwld/Ele", EleD::new())?
         .build()

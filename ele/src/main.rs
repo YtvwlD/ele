@@ -47,7 +47,7 @@ async fn main() -> Result<()> {
     env_logger::init();
     let cli: Cli = from_env();
     debug!("Establishing connection to dbus...");
-    let connection = Connection::session().await?;
+    let connection = Connection::system().await?;
     let eled_proxy = EleDProxy::new(&connection).await?;
     debug!("Waiting for authorization...");
     let mut args = cli.args.clone();
