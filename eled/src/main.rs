@@ -1,9 +1,11 @@
-use std::{collections::HashMap, env, error, future::pending, os::fd::AsFd};
-use log::debug;
+use std::{collections::HashMap, env, error, ops::Deref, os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd}, time::Duration};
+use log::{debug, error, trace};
 use pty_process::{Command, Pty};
-use tokio::process::Child;
-use zbus::{connection, fdo::Error, interface, message::Header, zvariant::Fd, Connection, ObjectServer};
+use tokio::{process::Child, sync::RwLock, time::sleep};
+use zbus::{connection, fdo::Error, interface, message::Header, object_server::InterfaceRef, zvariant::Fd, Connection, ObjectServer};
 use zbus_polkit::policykit1::{AuthorityProxy, CheckAuthorizationFlags, Subject};
+
+static PROCESS_IDS: RwLock<Vec<usize>> = RwLock::const_new(Vec::new());
 
 struct EleD {
     /// The ID to give to the next spawned process.
@@ -63,6 +65,7 @@ impl EleD {
         Self::check_authorization(connection, &header).await?;
         let process = EleProcess::new(sender, argv)?;
         let id = self.next_id;
+        PROCESS_IDS.write().await.push(id);
         self.next_id += 1;
         let path = format!("/de/ytvwld/Ele/{id}");
         debug!("Registering object at {path}...");
@@ -78,7 +81,7 @@ impl EleD {
 struct EleProcess {
     /// the unique name of the client that created this process
     sender: String,
-    pty: Pty,
+    pty: Option<Pty>,
     command: Command,
     child: Option<Child>,
 }
@@ -97,7 +100,7 @@ impl EleProcess {
             Error::InvalidArgs("command is missing".to_string())
         )?);
         command.args(argv_iter);
-        Ok(Self { sender, pty, command, child: None })
+        Ok(Self { sender, pty: Some(pty), command, child: None })
     }
 
     fn check_caller(&self, header: Header<'_>) -> Result<(), Error> {
@@ -107,6 +110,36 @@ impl EleProcess {
             Ok(())
         } else {
             Err(Error::AccessDenied("this process was created by a different sender".to_string()))
+        }
+    }
+
+    /// Check whether the child has exited.
+    /// 
+    /// If it has, close the pty, unregister the dbus object and return true.
+    async fn check_exited(&mut self, object_server: &ObjectServer, id: usize) -> Result<bool, Box<dyn error::Error>> {
+        // the child can only have exited if it has been started
+        if let Some(child) = self.child.as_mut() {
+            // let-chains are unstable
+            if child.try_wait()?.is_some() {
+                debug!("process {id} has exited; closing pty");
+                let pty = self.pty.take().expect("running process doesn't have a pty");
+                // dropping a pty doesn't seem to close it?
+                unsafe { OwnedFd::from_raw_fd(pty.as_raw_fd()) };
+                // deregister the whole object
+                if matches!(
+                    object_server.remove::<EleProcess, _>(format!("/de/ytvwld/Ele/{id}")).await,
+                    Ok(true)
+                ) {
+                    Ok(true)
+                } else {
+                    error!("failed to unregister process {id}");
+                    Err("failed to unregister process")?
+                }
+            } else {
+                Ok(false)
+            }
+        } else {
+            Ok(false)
         }
     }
 }
@@ -159,10 +192,10 @@ impl EleProcess {
             return Err(Error::FileExists("process is already running".to_string()));
         }
         debug!("spawning process...");
-        self.child = Some(self.command.spawn(&self.pty.pts().map_err(
+        self.child = Some(self.command.spawn(&self.pty.as_ref().unwrap().pts().map_err(
             |e| Error::SpawnFailed(e.to_string())
         )?).map_err(|e| Error::SpawnFailed(e.to_string()))?);
-        Ok(Fd::Borrowed(self.pty.as_fd()))
+        Ok(Fd::Borrowed(self.pty.as_ref().unwrap().as_fd()))
     }
 }
 
@@ -173,14 +206,28 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
     }
     env_logger::init();
     debug!("Establishing connection to dbus...");
-    let _conn = connection::Builder::system()?
+    let conn = connection::Builder::system()?
         .name("de.ytvwld.Ele")?
         .serve_at("/de/ytvwld/Ele", EleD::new())?
         .build()
         .await?;
 
-    // wait forever
-    pending::<()>().await;
-
-    Ok(())
+    // loop through the processes to see which has stopped
+    loop {
+        trace!("checking for processes that have exited...");
+        let len = PROCESS_IDS.read().await.len();
+        for id_idx in 0..len {
+            let id = {
+                let lock = PROCESS_IDS.read().await;
+                *lock.get(id_idx).expect("failed to get process id")
+            };
+            let process: InterfaceRef<EleProcess> = conn.object_server()
+                .interface(format!("/de/ytvwld/Ele/{id}")).await?;
+            if process.get_mut().await.check_exited(conn.object_server().deref(), id).await? {
+                PROCESS_IDS.write().await.remove(id_idx);
+                break;
+            };
+        }
+        sleep(Duration::from_secs(2)).await;
+    }
 }
