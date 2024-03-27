@@ -4,7 +4,11 @@ use argh::{from_env, FromArgs};
 use log::debug;
 use nix::{errno::Errno, sys::termios::{cfmakeraw, tcgetattr, tcsetattr, SetArg, Termios}, unistd::isatty};
 use pty_process::Pty;
-use tokio::{io::{copy, copy_bidirectional, join, stderr, stdin, stdout, Join, Stdin, Stdout}, process::{ChildStderr, ChildStdin, ChildStdout}};
+use tokio::{
+    io::{copy, copy_bidirectional, join, stderr, stdin, stdout, Join, Stdin, Stdout},
+    process::{ChildStderr, ChildStdin, ChildStdout},
+    signal::unix::{signal, SignalKind},
+};
 use zbus::{proxy, zvariant::OwnedFd, Connection, Result};
 
 #[derive(Debug, FromArgs)]
@@ -43,6 +47,7 @@ trait EleD {
 trait EleProcess {
     async fn environment(&self, environ: HashMap<String, String>) -> Result<()>;
     async fn directory(&self, path: &str) -> Result<()>;
+    async fn signal(&self, signal: i32) -> Result<()>;
     async fn spawn(&self) -> Result<Vec<OwnedFd>>;
 }
 
@@ -84,6 +89,8 @@ async fn main() -> Result<()> {
         let mut terminal = join(&mut stdin, &mut stdout);
         // set the tty as raw
         let old_attrs = set_raw(&mut terminal)?;
+        // in a raw tty, the shell on the other side will handle ^c and ^z,
+        // so we don't have to
         copy_bidirectional(&mut pty, &mut terminal).await?;
         // restore the terminal configuration
         if let Some(attrs) = old_attrs {
@@ -101,6 +108,15 @@ async fn main() -> Result<()> {
             std::os::fd::OwnedFd::from(fd_iter.next().unwrap())
         ))?;
         let mut stderr = stderr();
+        // we have to pass signals over
+        tokio::spawn(async move {
+            let kind = SignalKind::interrupt();
+            let mut stream = signal(kind).unwrap();
+            loop {
+                stream.recv().await;
+                process.signal(kind.as_raw_value() as i32).await.unwrap();
+            }
+        });
         tokio::spawn(async move { copy(&mut stdin, &mut child_stdin).await });
         tokio::spawn(async move { copy(&mut child_stdout, &mut stdout).await });
         copy(&mut child_stderr, &mut stderr).await?;

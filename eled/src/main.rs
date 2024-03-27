@@ -1,5 +1,6 @@
 use std::{collections::HashMap, env, error, ffi::OsStr, ops::Deref, os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd}, path::Path, process::Stdio, time::Duration};
 use log::{debug, error, trace};
+use nix::{sys::signal::{kill, Signal}, unistd::Pid};
 use pty_process::Pty;
 use tokio::{process::Child, sync::RwLock, time::sleep};
 use zbus::{connection, fdo::Error, interface, message::Header, object_server::InterfaceRef, zvariant::Fd, Connection, ObjectServer};
@@ -182,7 +183,27 @@ impl EleProcess {
         // TODO: pty.resize
         todo!()
     }
-        
+
+    async fn signal(
+        &mut self,
+        #[zbus(header)] header: Header<'_>,
+        signal: i32,
+    ) -> Result<(), Error> {
+        self.check_caller(header)?;
+        if let Some(child) = &self.child {
+            debug!("sending signal {signal} to process...");
+            kill(
+                Pid::from_raw(i32::try_from(
+                    child.id().ok_or(Error::IOError("child process has no pid".to_string()))?
+                ).map_err(|e| Error::IOError(e.to_string()))?),
+                Signal::try_from(signal).map_err(|e| Error::InvalidArgs(e.to_string()))?
+            ).map_err(|e| Error::IOError(e.to_string()))?;
+            Ok(())
+        } else {
+            return Err(Error::FileNotFound("process is not running".to_string()));
+        }
+    }
+
     async fn spawn(
         &mut self,
         #[zbus(header)] header: Header<'_>,
