@@ -4,7 +4,7 @@ use argh::{from_env, FromArgs};
 use log::debug;
 use nix::{errno::Errno, sys::termios::{cfmakeraw, tcgetattr, tcsetattr, SetArg, Termios}, unistd::isatty};
 use pty_process::Pty;
-use tokio::io::{copy_bidirectional, join, stdin, stdout, Join, Stdin, Stdout};
+use tokio::{io::{copy, copy_bidirectional, join, stderr, stdin, stdout, Join, Stdin, Stdout}, process::{ChildStderr, ChildStdin, ChildStdout}};
 use zbus::{proxy, zvariant::OwnedFd, Connection, Result};
 
 #[derive(Debug, FromArgs)]
@@ -13,6 +13,10 @@ struct Cli {
     /// what user to run the program as
     #[argh(option, default = "\"root\".to_string()")]
     user: String,
+
+    /// whether to attach the process to a pty
+    #[argh(switch, short = 'i')]
+    interactive: bool,
 
     /// the appliation to run
     #[argh(positional)]
@@ -29,7 +33,7 @@ struct Cli {
     default_path = "/de/ytvwld/Ele"
 )]
 trait EleD {
-    async fn create(&self, user: &str, argv: Vec<String>) -> Result<String>;
+    async fn create(&self, user: &str, argv: Vec<String>, interactive: bool) -> Result<String>;
 }
 
 #[proxy(
@@ -39,7 +43,7 @@ trait EleD {
 trait EleProcess {
     async fn environment(&self, environ: HashMap<String, String>) -> Result<()>;
     async fn directory(&self, path: &str) -> Result<()>;
-    async fn spawn(&self) -> Result<OwnedFd>;
+    async fn spawn(&self) -> Result<Vec<OwnedFd>>;
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -55,7 +59,7 @@ async fn main() -> Result<()> {
     debug!("Waiting for authorization...");
     let mut args = cli.args.clone();
     args.insert(0, cli.program);
-    let path = eled_proxy.create(&cli.user, args).await?;
+    let path = eled_proxy.create(&cli.user, args, cli.interactive).await?;
     let process = EleProcessProxy::builder(&connection)
         .path(path)?
         .build().await?;
@@ -70,18 +74,36 @@ async fn main() -> Result<()> {
     ).await?;
     // TODO: environment and resize
     debug!("Spawning process...");
-    let fd = process.spawn().await?;
-    assert!(fd.as_fd().is_terminal());
-    let mut pty = unsafe { Pty::from_raw_fd(fd.as_raw_fd()).unwrap() };
+    let attached_to = process.spawn().await?;
     let mut stdin = stdin();
     let mut stdout = stdout();
-    let mut terminal = join(&mut stdin, &mut stdout);
-    // set the tty as raw
-    let old_attrs = set_raw(&mut terminal)?;
-    copy_bidirectional(&mut pty, &mut terminal).await?;
-    // restore the terminal configuration
-    if let Some(attrs) = old_attrs {
-        reset_terminal(&mut terminal, attrs)?;
+    if cli.interactive {
+        let fd = attached_to.into_iter().next().unwrap();
+        assert!(fd.as_fd().is_terminal());
+        let mut pty = unsafe { Pty::from_raw_fd(fd.as_raw_fd()).unwrap() };
+        let mut terminal = join(&mut stdin, &mut stdout);
+        // set the tty as raw
+        let old_attrs = set_raw(&mut terminal)?;
+        copy_bidirectional(&mut pty, &mut terminal).await?;
+        // restore the terminal configuration
+        if let Some(attrs) = old_attrs {
+            reset_terminal(&mut terminal, attrs)?;
+        }
+    } else {
+        let mut fd_iter = attached_to.into_iter();
+        let mut child_stdin = ChildStdin::from_std(std::process::ChildStdin::from(
+            std::os::fd::OwnedFd::from(fd_iter.next().unwrap())
+        ))?;
+        let mut child_stdout = ChildStdout::from_std(std::process::ChildStdout::from(
+            std::os::fd::OwnedFd::from(fd_iter.next().unwrap())
+        ))?;
+        let mut child_stderr = ChildStderr::from_std(std::process::ChildStderr::from(
+            std::os::fd::OwnedFd::from(fd_iter.next().unwrap())
+        ))?;
+        let mut stderr = stderr();
+        tokio::spawn(async move { copy(&mut stdin, &mut child_stdin).await });
+        tokio::spawn(async move { copy(&mut child_stdout, &mut stdout).await });
+        copy(&mut child_stderr, &mut stderr).await?;
     }
 
     Ok(())

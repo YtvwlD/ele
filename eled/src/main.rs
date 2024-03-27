@@ -1,6 +1,6 @@
-use std::{collections::HashMap, env, error, ops::Deref, os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd}, time::Duration};
+use std::{collections::HashMap, env, error, ffi::OsStr, ops::Deref, os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd}, path::Path, process::Stdio, time::Duration};
 use log::{debug, error, trace};
-use pty_process::{Command, Pty};
+use pty_process::Pty;
 use tokio::{process::Child, sync::RwLock, time::sleep};
 use zbus::{connection, fdo::Error, interface, message::Header, object_server::InterfaceRef, zvariant::Fd, Connection, ObjectServer};
 use zbus_polkit::policykit1::{AuthorityProxy, CheckAuthorizationFlags, Subject};
@@ -53,7 +53,7 @@ impl EleD {
         #[zbus(connection)] connection: &Connection,
         #[zbus(object_server)] object_server: &&ObjectServer,
         #[zbus(header)] header: Header<'_>,
-        user: &str, argv: Vec<&str>,
+        user: &str, argv: Vec<&str>, interactive: bool,
     ) -> Result<String, Error> {
         let sender = header
             .sender()
@@ -63,7 +63,7 @@ impl EleD {
         debug!("Client {} has asked us to execute {:?} as {}.", sender, argv, user);
         assert_eq!(user, "root"); // TODO
         Self::check_authorization(connection, &header).await?;
-        let process = EleProcess::new(sender, argv)?;
+        let process = EleProcess::new(sender, argv, interactive)?;
         let id = self.next_id;
         PROCESS_IDS.write().await.push(id);
         self.next_id += 1;
@@ -81,7 +81,7 @@ impl EleD {
 struct EleProcess {
     /// the unique name of the client that created this process
     sender: String,
-    pty: Option<Pty>,
+    attached_to: AttachedTo,
     command: Command,
     child: Option<Child>,
 }
@@ -91,16 +91,14 @@ impl EleProcess {
     /// 
     /// We *need* to make sure that the caller is authenticated to perform this
     /// action *beforehand*.
-    fn new(sender: String, argv: Vec<&str>) -> Result<Self, Error> {
-        debug!("Creating pty...");
-        let pty = Pty::new()
-            .map_err(|e| Error::SpawnFailed(e.to_string()))?;
+    fn new(sender: String, argv: Vec<&str>, interactive: bool) -> Result<Self, Error> {
+        let attached_to = AttachedTo::new(interactive)?;
         let mut argv_iter = argv.iter();
         let mut command = Command::new(argv_iter.next().ok_or(
             Error::InvalidArgs("command is missing".to_string())
-        )?);
+        )?, interactive);
         command.args(argv_iter);
-        Ok(Self { sender, pty: Some(pty), command, child: None })
+        Ok(Self { sender, attached_to, command, child: None })
     }
 
     fn check_caller(&self, header: Header<'_>) -> Result<(), Error> {
@@ -122,9 +120,11 @@ impl EleProcess {
             // let-chains are unstable
             if child.try_wait()?.is_some() {
                 debug!("process {id} has exited; closing pty");
-                let pty = self.pty.take().expect("running process doesn't have a pty");
-                // dropping a pty doesn't seem to close it?
-                unsafe { OwnedFd::from_raw_fd(pty.as_raw_fd()) };
+                if let AttachedTo::Pty(pty) = &self.attached_to {
+                    // dropping a pty doesn't seem to close it?
+                    unsafe { OwnedFd::from_raw_fd(pty.as_raw_fd()) };
+                    self.attached_to = AttachedTo::Nothing;
+                }
                 // deregister the whole object
                 if matches!(
                     object_server.remove::<EleProcess, _>(format!("/de/ytvwld/Ele/{id}")).await,
@@ -186,16 +186,121 @@ impl EleProcess {
     async fn spawn(
         &mut self,
         #[zbus(header)] header: Header<'_>,
-    ) -> Result<Fd, Error> {
+    ) -> Result<Vec<Fd>, Error> {
         self.check_caller(header)?;
         if self.child.is_some() {
             return Err(Error::FileExists("process is already running".to_string()));
         }
         debug!("spawning process...");
-        self.child = Some(self.command.spawn(&self.pty.as_ref().unwrap().pts().map_err(
-            |e| Error::SpawnFailed(e.to_string())
-        )?).map_err(|e| Error::SpawnFailed(e.to_string()))?);
-        Ok(Fd::Borrowed(self.pty.as_ref().unwrap().as_fd()))
+        self.child = Some(self.command.spawn(&self.attached_to)?);
+        Ok(
+            self.attached_to
+            .fds(self.child.as_mut().unwrap())
+            .into_iter()
+            .map(|f| Fd::Borrowed(f))
+            .collect()
+        )
+    }
+}
+
+/// Something a process can be attached to: a pty for interactive use or
+/// pipes for non-interactive use.
+enum AttachedTo {
+    /// A pseudo-terminal. This is useful for interactive applications.
+    Pty(Pty),
+    /// stdin, stdout and stderr. This is useful for non-interactive applications.
+    Pipes,
+    /// Nothing. The application has probably exited.
+    Nothing,
+}
+
+impl AttachedTo {
+    fn new(interactive: bool) -> Result<Self, Error> {
+        if interactive {
+            debug!("Creating pty...");
+            Pty::new()
+                .map(Self::Pty)
+                .map_err(|e| Error::SpawnFailed(e.to_string()))
+        } else {
+            Ok(Self::Pipes)
+        }
+    }
+
+    fn fds<'a>(&'a self, child: &'a mut Child) -> Vec<BorrowedFd<'a>> {
+        let mut borrowed = Vec::new();
+        match self {
+            Self::Pty(pty) => borrowed.push(pty.as_fd()),
+            Self::Pipes => {
+                borrowed.push(child.stdin.as_ref().unwrap().as_fd());
+                borrowed.push(child.stderr.as_ref().unwrap().as_fd());
+                borrowed.push(child.stdout.as_ref().unwrap().as_fd());
+            },
+            Self::Nothing => (),
+        }
+        borrowed
+    }
+}
+
+/// A command to be executed.
+/// 
+/// This abstracts over interactive and non-interactive commands.
+enum Command {
+    Pty(pty_process::Command),
+    Tokio(tokio::process::Command),
+}
+
+impl Command {
+    fn new<S: AsRef<OsStr>>(program: S, interactive: bool) -> Self {
+        match interactive {
+            true => Self::Pty(pty_process::Command::new(program)),
+            false => Self::Tokio(tokio::process::Command::new(program)),
+        }
+    }
+    
+    fn args(&mut self, args: std::slice::Iter<'_, &str>) -> &mut Self {
+        match self {
+            Command::Pty(p) => { p.args(args); self },
+            Command::Tokio(t) => { t.args(args); self },
+        }
+    }
+
+    fn envs<I, K, V>(&mut self, vars: I) -> &mut Self
+    where I: IntoIterator<Item = (K, V)>, K: AsRef<std::ffi::OsStr>, V: AsRef<std::ffi::OsStr> {
+        match self {
+            Command::Pty(p) => { p.envs(vars); self },
+            Command::Tokio(t) => { t.envs(vars); self },
+        }
+    }
+
+    fn current_dir<P: AsRef<Path>>(&mut self, dir: P) -> &mut Self {
+        match self {
+            Command::Pty(p) => { p.current_dir(dir); self },
+            Command::Tokio(t) => { t.current_dir(dir); self },
+        }
+    }
+
+    fn spawn(&mut self, attached_to: &AttachedTo) -> Result<Child, Error> {
+        match self {
+            Command::Pty(p) => if let AttachedTo::Pty(pty) = attached_to {
+                p.spawn(&pty.pts().map_err(
+                    |e| Error::SpawnFailed(e.to_string())
+                )?).map_err(
+                    |e| Error::SpawnFailed(e.to_string())
+                )
+            } else {
+                panic!("pty is missing");
+            },
+            Command::Tokio(t) => if let AttachedTo::Pipes = attached_to {
+                t.stdin(Stdio::piped());
+                t.stdout(Stdio::piped());
+                t.stderr(Stdio::piped());
+                t.spawn().map_err(
+                    |e| Error::SpawnFailed(e.to_string())
+                )
+            } else {
+                panic!("pipes are missing");
+            }
+        }
     }
 }
 
