@@ -1,5 +1,7 @@
 # ele
 
+**Please use [run0](https://www.freedesktop.org/software/systemd/man/devel/run0.html) instead.**
+
 ele spawns elevated processes. To make this work, there are two pieces:
 
 ## ele
@@ -57,4 +59,7 @@ client and daemon, connected via dbus and polkit.
 Interestingly, `pkexec` just uses polkit for authentication -- the binary itself
 is setuid.
 
-(Please don't use it, though, as this is currently just a proof of concept.)
+systemd's [run0](https://www.freedesktop.org/software/systemd/man/devel/run0.html)
+is pretty much the same, so use that.
+
+This is currently just a proof of concept. :)
